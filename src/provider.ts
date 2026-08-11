@@ -1052,9 +1052,18 @@ function validateMessageSequence(messages: DeepSeekMessage[]): string[] {
             issues.push(`Message [${i}]: system role must be first, not at index ${i}`);
         }
 
-        // Check 2: Two consecutive user messages
-        if (msg.role === 'user' && prev?.role === 'user') {
-            issues.push(`Message [${i}]: two consecutive user messages ([${i - 1}] and [${i}])`);
+        // Check 2: Run of 3+ consecutive user messages.
+        // Two consecutive user messages are LEGITIMATE (e.g. internal title/
+        // progress-message requests send instructions + request as two user
+        // messages, and DeepSeek accepts consecutive user messages anyway),
+        // so only flag a degenerate run of three or more. This fires once per
+        // run, at the third user message in the sequence.
+        if (
+            msg.role === 'user' &&
+            prev?.role === 'user' &&
+            messages[i - 2]?.role === 'user'
+        ) {
+            issues.push(`Message [${i}]: three or more consecutive user messages (run ends at [${i}])`);
         }
 
         // Check 3: Two consecutive assistant messages (without tool calls)
