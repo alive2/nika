@@ -24,6 +24,69 @@ export interface StreamResult {
 }
 
 /**
+ * Fetch with retry for transient network-level failures.
+ *
+ * "fetch failed" in VS Code's extension host (Electron fetch) is frequently a
+ * transient TLS/network failure. We retry the initial connection a few times
+ * with exponential backoff — but ONLY on network-level errors (fetch threw
+ * before receiving an HTTP response). HTTP error responses (4xx/5xx) and
+ * user-initiated aborts are propagated immediately without retrying.
+ */
+async function fetchWithRetry(
+    url: string,
+    init: RequestInit,
+    signal: AbortSignal,
+    options: { retries?: number; label?: string } = {}
+): Promise<Response> {
+    const retries = options.retries ?? 2; // total attempts = retries + 1
+    const label = options.label ?? url;
+
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        if (signal.aborted) {
+            throw new DOMException('The operation was aborted.', 'AbortError');
+        }
+        try {
+            return await fetch(url, init);
+        } catch (err) {
+            if (err instanceof DOMException && err.name === 'AbortError') {
+                throw err; // Never retry a user cancellation
+            }
+            lastError = err;
+            const cause = err instanceof Error ? err.message : String(err);
+            if (attempt < retries) {
+                const delayMs = 500 * Math.pow(2, attempt);
+                log.warn(
+                    `Transient network error connecting to ${label} ` +
+                    `(attempt ${attempt + 1}/${retries + 1}): ${cause}. ` +
+                    `Retrying in ${delayMs}ms.`
+                );
+                await new Promise(resolve => setTimeout(resolve, delayMs));
+                if (signal.aborted) {
+                    throw new DOMException('The operation was aborted.', 'AbortError');
+                }
+            }
+        }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+/**
+ * Build a hint for the common "fetch failed" TLS certificate issue.
+ * VS Code's extension host uses Electron's fetch, which can fail with a
+ * generic "fetch failed" when TLS certificate validation fails, even when
+ * curl/Node.js work fine. This is a known VS Code issue.
+ */
+function fetchFailedTlsHint(cause: string): string {
+    if (cause !== 'fetch failed' && !cause.includes('fetch failed')) {
+        return '';
+    }
+    return ' This is often caused by TLS certificate validation in VS Code\'s embedded browser. ' +
+        'Try setting "http.systemCertificates": true in VS Code settings, or adding ' +
+        '"http.proxyStrictSSL": false as a workaround.';
+}
+
+/**
  * Log the full request details for debugging.
  */
 function logRequestDetails(request: DeepSeekRequest): void {
@@ -76,21 +139,25 @@ export async function streamDeepSeekChat(
 
     let response: Response;
     try {
-        response = await fetch(DEEPSEEK_CHAT_ENDPOINT, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`,
-                'Accept': 'text/event-stream',
+        // Network-level failures (DNS, TLS, connection refused, etc.) are
+        // retried with backoff — see fetchWithRetry(). HTTP errors and aborts
+        // are not retried.
+        response = await fetchWithRetry(
+            DEEPSEEK_CHAT_ENDPOINT,
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Accept': 'text/event-stream',
+                },
+                body: safeStringify(streamRequest),
+                signal,
             },
-            body: safeStringify(streamRequest),
             signal,
-        });
+            { label: 'DeepSeek API' }
+        );
     } catch (fetchErr) {
-        // Network-level failures (DNS, TLS, connection refused, etc.)
-        // VS Code's extension host uses Electron's fetch, which can fail with
-        // a generic "fetch failed" when TLS certificate validation fails,
-        // even when curl/Node.js work fine. This is a known VS Code issue.
         if (fetchErr instanceof DOMException && fetchErr.name === 'AbortError') {
             throw fetchErr; // Let the caller handle cancellation
         }
@@ -101,12 +168,7 @@ export async function streamDeepSeekChat(
         );
 
         // Provide more specific troubleshooting for common VS Code fetch issues
-        let hint = '';
-        if (cause === 'fetch failed' || cause.includes('fetch failed')) {
-            hint = ' This is often caused by TLS certificate validation in VS Code\'s embedded browser. ' +
-                'Try setting "http.systemCertificates": true in VS Code settings, or adding ' +
-                '"http.proxyStrictSSL": false as a workaround.';
-        }
+        const hint = fetchFailedTlsHint(cause);
 
         throw new Error(
             `Failed to connect to DeepSeek API (${DEEPSEEK_CHAT_ENDPOINT}): ${cause}.` +
@@ -296,16 +358,24 @@ export async function streamDeepSeekResponses(
 
     let response: Response;
     try {
-        response = await fetch(DEEPSEEK_RESPONSES_ENDPOINT, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`,
-                'Accept': 'text/event-stream',
+        // Network-level failures (DNS, TLS, connection refused, etc.) are
+        // retried with backoff — see fetchWithRetry(). HTTP errors and aborts
+        // are not retried.
+        response = await fetchWithRetry(
+            DEEPSEEK_RESPONSES_ENDPOINT,
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Accept': 'text/event-stream',
+                },
+                body: safeStringify(streamRequest),
+                signal,
             },
-            body: safeStringify(streamRequest),
             signal,
-        });
+            { label: 'DeepSeek Responses API' }
+        );
     } catch (fetchErr) {
         if (fetchErr instanceof DOMException && fetchErr.name === 'AbortError') {
             throw fetchErr; // Let the caller handle cancellation
@@ -315,8 +385,11 @@ export async function streamDeepSeekResponses(
             `Network error connecting to DeepSeek Responses API (${DEEPSEEK_RESPONSES_ENDPOINT})`,
             fetchErr
         );
+        // Provide more specific troubleshooting for common VS Code fetch issues
+        const hint = fetchFailedTlsHint(cause);
         throw new Error(
-            `Failed to connect to DeepSeek Responses API (${DEEPSEEK_RESPONSES_ENDPOINT}): ${cause}.`
+            `Failed to connect to DeepSeek Responses API (${DEEPSEEK_RESPONSES_ENDPOINT}): ${cause}.` +
+            hint
         );
     }
 

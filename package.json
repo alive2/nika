@@ -2,7 +2,7 @@
   "name": "nika",
   "displayName": "Nika",
   "description": "DeepSeek language model provider for VS Code Copilot Chat, with configurable vision preprocessing (Gemma 4 via Ollama or Gemini)",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "publisher": "nika",
   "icon": "logo.png",
   "license": "MIT",
