@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { SecretStore } from './secrets.js';
-import { DEEPSEEK_MODELS, DEEPSEEK_RESPONSES_MODEL, getConfig, getSelectedModel, getMaxTokens, getTemperature, ThinkingEffort, getThinkingEffort, getContextWindowTokens, getContextWindowPreset, getVisionModelKey, getVisionSource, VisionSource } from './config.js';
+import { DEEPSEEK_MODELS, DEEPSEEK_RESPONSES_MODELS, getResponsesModel, getConfig, getSelectedModel, getMaxTokens, getTemperature, ThinkingEffort, getThinkingEffort, getContextWindowTokens, getContextWindowPreset, getVisionModelKey, getVisionSource, VisionSource } from './config.js';
 import { vscodeMessagesToDeepSeek, deepseekMessagesToResponsesInput } from './transform/messages.js';
 import { streamDeepSeekChat, streamDeepSeekResponses } from './api/deepseek.js';
 import { safeStringify } from './api/sanitize.js';
@@ -175,23 +175,25 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
                 models.push(modelInfo as vscode.LanguageModelChatInformation);
             }
 
-            // Responses API model (flash only) — picked via the Copilot picker,
+            // Responses API models (flash + pro) — picked via the Copilot picker,
             // intentionally NOT part of DEEPSEEK_MODELS / nika.selectedModel so
-            // the chat-completions handler can never be told to send this id.
-            const responsesModelInfo: vscode.LanguageModelChatInformation & {
-                configurationSchema?: ReturnType<typeof buildThinkingEffortSchema>;
-            } = {
-                id: DEEPSEEK_RESPONSES_MODEL.id,
-                name: DEEPSEEK_RESPONSES_MODEL.name,
-                family: DEEPSEEK_RESPONSES_MODEL.family,
-                version: DEEPSEEK_RESPONSES_MODEL.version,
-                maxInputTokens: Math.min(DEEPSEEK_RESPONSES_MODEL.maxInputTokens, effectiveInputTokens),
-                maxOutputTokens: Math.min(DEEPSEEK_RESPONSES_MODEL.maxOutputTokens, effectiveOutputTokens),
-                capabilities: DEEPSEEK_RESPONSES_MODEL.capabilities,
-                detail: DEEPSEEK_RESPONSES_MODEL.detail,
-            };
-            responsesModelInfo.configurationSchema = buildThinkingEffortSchema();
-            models.push(responsesModelInfo as vscode.LanguageModelChatInformation);
+            // the chat-completions handler can never be told to send these ids.
+            for (const rm of DEEPSEEK_RESPONSES_MODELS) {
+                const responsesModelInfo: vscode.LanguageModelChatInformation & {
+                    configurationSchema?: ReturnType<typeof buildThinkingEffortSchema>;
+                } = {
+                    id: rm.id,
+                    name: rm.name,
+                    family: rm.family,
+                    version: rm.version,
+                    maxInputTokens: Math.min(rm.maxInputTokens, effectiveInputTokens),
+                    maxOutputTokens: Math.min(rm.maxOutputTokens, effectiveOutputTokens),
+                    capabilities: rm.capabilities,
+                    detail: rm.detail,
+                };
+                responsesModelInfo.configurationSchema = buildThinkingEffortSchema();
+                models.push(responsesModelInfo as vscode.LanguageModelChatInformation);
+            }
         } else if (!options.silent) {
             vscode.window.showWarningMessage(
                 'Nika: DeepSeek API key not configured. DeepSeek models will not appear in the model picker until the key is set.'
@@ -265,7 +267,7 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
         if (model.id.startsWith('gemma4:')) {
             return this.handleGemma4Chat(model.id, messages, progress, token);
         }
-        if (model.id === DEEPSEEK_RESPONSES_MODEL.id) {
+        if (getResponsesModel(model.id)) {
             return this.handleDeepSeekResponsesChat(model.id, messages, options, progress, token);
         }
 
@@ -532,9 +534,10 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
     /**
      * Handle a chat request routed to the DeepSeek Responses API (POST /responses).
      *
-     * Currently only `deepseek-v4-flash` is supported on this endpoint, so the
-     * API model is always flash — regardless of `nika.selectedModel` (which is
-     * scoped to the chat-completions handler).
+     * Supports `deepseek-v4-flash` and `deepseek-v4-pro` on this endpoint.
+     * The API model name is derived from the Copilot-facing model id (e.g.
+     * `deepseek-v4-pro-responses` → `deepseek-v4-pro`), NOT from
+     * `nika.selectedModel` (which is scoped to the chat-completions handler).
      *
      * Reuses the same vision pipeline, message conversion, context truncation,
      * thinking-effort dropdown, and tool mapping as the chat-completions path —
@@ -553,6 +556,14 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
                 'DeepSeek API key not configured. Run "Nika: Input Deepseek userToken" from the command palette (F1).'
             );
         }
+
+        // Map the Copilot-facing id (e.g. deepseek-v4-pro-responses) to the
+        // API model name (deepseek-v4-pro). The router guarantees this exists.
+        const responsesModel = getResponsesModel(modelId);
+        if (!responsesModel) {
+            throw new Error(`Unknown Responses API model: ${modelId}`);
+        }
+        const apiModel = responsesModel.apiModel;
 
         if (token.isCancellationRequested) return;
 
@@ -595,8 +606,7 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
             : effectiveMaxTokens;
 
         const request: DeepSeekResponsesRequest = {
-            // The Responses API only supports deepseek-v4-flash (not Pro).
-            model: 'deepseek-v4-flash',
+            model: apiModel,
             input,
             temperature: getTemperature(),
             max_output_tokens: boostedTokens,
@@ -613,7 +623,7 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
         // Log request summary
         const bodySize = new TextEncoder().encode(safeStringify(request)).length;
         log.info(
-            `Sending DeepSeek Responses request: model=${modelId} (api=deepseek-v4-flash), ` +
+            `Sending DeepSeek Responses request: model=${modelId} (api=${apiModel}), ` +
             `inputItems=${Array.isArray(input) ? input.length : 0}, ` +
             `tools=${options.tools?.length ?? 0}, ` +
             `bodySize=${(bodySize / 1024).toFixed(1)}KB, ` +
@@ -622,7 +632,7 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
             `temperature=${getTemperature()}`
         );
         getOutputChannel().appendLine(
-            `[Nika] Responses API: model=${modelId}, inputItems=${Array.isArray(input) ? input.length : 0}, ` +
+            `[Nika] Responses API: model=${modelId} (api=${apiModel}), inputItems=${Array.isArray(input) ? input.length : 0}, ` +
             `thinking=${thinkingEnabled}, tools=${options.tools?.length ?? 0}`
         );
 

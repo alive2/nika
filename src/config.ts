@@ -35,26 +35,48 @@ export const VISION_MODELS = [
 export type VisionModelId = (typeof VISION_MODELS)[number]['id'];
 
 /**
- * DeepSeek V4 Flash exposed through the Responses API (POST /responses).
+ * DeepSeek models exposed through the Responses API (POST /responses).
  *
  * Kept SEPARATE from DEEPSEEK_MODELS on purpose:
- * - The Responses API currently only supports `deepseek-v4-flash` (not Pro).
  * - `nika.selectedModel` / "Nika: Choose Provider" drives the chat-completions
- *   request model id, so this id must NOT be selectable there (the inline
- *   handler would send it to /chat/completions and get a 400).
- * - It is picked via Copilot Chat's model picker, where routing in
- *   `provideLanguageModelChatResponse` dispatches it to the /responses handler.
+ *   request model id, so these ids must NOT be selectable there (the inline
+ *   handler would send them to /chat/completions and get a 400).
+ * - They are picked via Copilot Chat's model picker, where routing in
+ *   `provideLanguageModelChatResponse` dispatches them to the /responses handler.
+ * - `apiModel` is the model id sent in the API request (`deepseek-v4-flash` /
+ *   `deepseek-v4-pro`), while `id` is the Copilot-facing id.
  */
-export const DEEPSEEK_RESPONSES_MODEL = {
-    id: 'deepseek-v4-flash-responses',
-    name: 'DeepSeek V4 Flash (Responses)',
-    family: 'deepseek',
-    version: '0731',
-    maxInputTokens: 1_000_000,
-    maxOutputTokens: 384_000,
-    capabilities: { imageInput: true, toolCalling: true },
-    detail: 'Flash 0731 via the Responses API — agent-native tooling & server-side web search',
-} as const;
+export const DEEPSEEK_RESPONSES_MODELS = [
+    {
+        id: 'deepseek-v4-flash-responses',
+        name: 'DeepSeek V4 Flash (Responses)',
+        apiModel: 'deepseek-v4-flash',
+        family: 'deepseek',
+        version: '0731',
+        maxInputTokens: 1_000_000,
+        maxOutputTokens: 384_000,
+        capabilities: { imageInput: true, toolCalling: true },
+        detail: 'Flash 0731 via the Responses API — agent-native tooling & server-side web search',
+    },
+    {
+        id: 'deepseek-v4-pro-responses',
+        name: 'DeepSeek V4 Pro (Responses)',
+        apiModel: 'deepseek-v4-pro',
+        family: 'deepseek',
+        version: '4.0.0',
+        maxInputTokens: 1_000_000,
+        maxOutputTokens: 384_000,
+        capabilities: { imageInput: true, toolCalling: true },
+        detail: 'Pro via the Responses API — agent-native tooling & server-side web search',
+    },
+] as const;
+
+export type DeepSeekResponsesModel = (typeof DEEPSEEK_RESPONSES_MODELS)[number];
+
+/** Look up a Responses model by its Copilot-facing id. */
+export function getResponsesModel(id: string): DeepSeekResponsesModel | undefined {
+    return DEEPSEEK_RESPONSES_MODELS.find(m => m.id === id);
+}
 
 export const DEEPSEEK_MODELS = [
     {
