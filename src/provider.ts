@@ -8,6 +8,7 @@ import { resolveImageMessages, resolveVisionDescriber } from './vision/pipeline.
 import { createReplayMarkerPart, hasImageParts } from './vision/replay.js';
 import { log } from './log.js';
 import { visionLog } from './vision/log.js';
+import { NikaUsageTracker, TokenTrackingProgress } from './usage/tracker.js';
 import type { DeepSeekRequest, DeepSeekTool, DeepSeekMessage, DeepSeekResponsesRequest, DeepSeekResponsesTool } from './api/types.js';
 import type { ReplayMarkerMetadata } from './vision/types.js';
 
@@ -119,9 +120,12 @@ function truncateMessagesToContextWindow(messages: DeepSeekMessage[]): DeepSeekM
  */
 export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode.LanguageModelChatInformation> {
     private readonly secrets: SecretStore;
+    /** Persistent DeepSeek token usage ledger (globalState-backed). */
+    readonly usageTracker: NikaUsageTracker;
 
     constructor(context: vscode.ExtensionContext) {
         this.secrets = new SecretStore(context.secrets);
+        this.usageTracker = new NikaUsageTracker(context);
     }
 
     /** Expose key check so the extension can prompt on startup. */
@@ -435,6 +439,20 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
             abortController.abort();
         });
 
+        // Wrap the progress reporter to track live output tokens and capture
+        // the exact server-reported usage at the end of the stream.
+        const trackedProgress = new TokenTrackingProgress(progress, () => this.usageTracker.notifyLiveChange());
+        const disposeStream = this.usageTracker.trackStream(trackedProgress);
+        // Best-effort usage attribution. A real session id arrives via
+        // modelOptions._nikaSessionId when the host threads it (reference-fork
+        // behavior); otherwise the tracker falls back to a heuristic id.
+        const usageMeta = {
+            sessionId: typeof options.modelOptions?.['_nikaSessionId'] === 'string' ? options.modelOptions['_nikaSessionId'] : undefined,
+            initiator: typeof options.modelOptions?.['requestInitiator'] === 'string' ? options.modelOptions['requestInitiator'] : undefined,
+            title: extractPromptTitle(messages),
+            workspace: currentWorkspaceName(),
+        };
+
         try {
             const streamResult = await streamDeepSeekChat(
                 request,
@@ -442,12 +460,12 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
                 abortController.signal,
                 // onText
                 (text: string) => {
-                    progress.report(new vscode.LanguageModelTextPart(text));
+                    trackedProgress.report(new vscode.LanguageModelTextPart(text));
                 },
                 // onToolCalls
                 (toolCalls) => {
                     for (const tc of toolCalls) {
-                        progress.report(
+                        trackedProgress.report(
                             new vscode.LanguageModelToolCallPart(tc.id, tc.name, tc.arguments)
                         );
                     }
@@ -456,13 +474,15 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
                 (usage) => {
                     // Report token usage
                     if (usage) {
-                        progress.report(
+                        trackedProgress.report(
                             new vscode.LanguageModelDataPart(
                                 new TextEncoder().encode(
                                     JSON.stringify({
                                         prompt_tokens: usage.promptTokens,
                                         completion_tokens: usage.completionTokens,
                                         total_tokens: usage.promptTokens + usage.completionTokens,
+                                        prompt_tokens_details: { cached_tokens: usage.cachedTokens },
+                                        completion_tokens_details: { reasoning_tokens: usage.reasoningTokens },
                                     })
                                 ),
                                 'usage'
@@ -474,10 +494,13 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
                     // This allows the next turn to replay descriptions without
                     // calling the vision model again.
                     if (replayMarkerMetadata.visionText) {
-                        progress.report(createReplayMarkerPart(replayMarkerMetadata));
+                        trackedProgress.report(createReplayMarkerPart(replayMarkerMetadata));
                     }
                 }
             );
+
+            // Record exact usage (or the live-estimate fallback) in the ledger.
+            this._recordUsage(modelId, trackedProgress, usageMeta);
 
             // If DeepSeek returned nothing, don't throw — VS Code's agent loop
             // handles empty responses fine. Just log it for diagnostics.
@@ -492,6 +515,20 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
                 // Cancelled by user — silently stop
                 return;
             }
+            // Record the failed request so usage stays complete.
+            this.usageTracker.record({
+                model: modelId,
+                sessionId: usageMeta.sessionId,
+                initiator: usageMeta.initiator,
+                title: usageMeta.title,
+                workspace: usageMeta.workspace,
+                promptTokens: 0,
+                completionTokens: 0,
+                totalTokens: 0,
+                cachedTokens: 0,
+                reasoningTokens: 0,
+                error: true,
+            });
             // Build a descriptive error for VS Code's error reporting.
             // The Copilot summarizer catches errors and logs them; an opaque
             // "unknown" message makes debugging impossible. We wrap the error
@@ -528,6 +565,7 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
             throw wrappedError;
         } finally {
             cancelDisposable.dispose();
+            disposeStream();
         }
     }
 
@@ -641,6 +679,17 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
             abortController.abort();
         });
 
+        // Wrap the progress reporter to track live output tokens and capture
+        // the exact server-reported usage at the end of the stream.
+        const trackedProgress = new TokenTrackingProgress(progress, () => this.usageTracker.notifyLiveChange());
+        const disposeStream = this.usageTracker.trackStream(trackedProgress);
+        const usageMeta = {
+            sessionId: typeof options.modelOptions?.['_nikaSessionId'] === 'string' ? options.modelOptions['_nikaSessionId'] : undefined,
+            initiator: typeof options.modelOptions?.['requestInitiator'] === 'string' ? options.modelOptions['requestInitiator'] : undefined,
+            title: extractPromptTitle(messages),
+            workspace: currentWorkspaceName(),
+        };
+
         try {
             const streamResult = await streamDeepSeekResponses(
                 request,
@@ -648,12 +697,12 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
                 abortController.signal,
                 // onText
                 (text: string) => {
-                    progress.report(new vscode.LanguageModelTextPart(text));
+                    trackedProgress.report(new vscode.LanguageModelTextPart(text));
                 },
                 // onToolCalls
                 (toolCalls) => {
                     for (const tc of toolCalls) {
-                        progress.report(
+                        trackedProgress.report(
                             new vscode.LanguageModelToolCallPart(tc.id, tc.name, tc.arguments)
                         );
                     }
@@ -661,13 +710,15 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
                 // onComplete
                 (usage) => {
                     if (usage) {
-                        progress.report(
+                        trackedProgress.report(
                             new vscode.LanguageModelDataPart(
                                 new TextEncoder().encode(
                                     JSON.stringify({
                                         prompt_tokens: usage.promptTokens,
                                         completion_tokens: usage.completionTokens,
                                         total_tokens: usage.promptTokens + usage.completionTokens,
+                                        prompt_tokens_details: { cached_tokens: usage.cachedTokens },
+                                        completion_tokens_details: { reasoning_tokens: usage.reasoningTokens },
                                     })
                                 ),
                                 'usage'
@@ -675,10 +726,13 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
                         );
                     }
                     if (replayMarkerMetadata.visionText) {
-                        progress.report(createReplayMarkerPart(replayMarkerMetadata));
+                        trackedProgress.report(createReplayMarkerPart(replayMarkerMetadata));
                     }
                 }
             );
+
+            // Record exact usage (or the live-estimate fallback) in the ledger.
+            this._recordUsage(modelId, trackedProgress, usageMeta);
 
             if (!streamResult.receivedContent && !streamResult.receivedToolCalls) {
                 log.info(
@@ -690,6 +744,20 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
             if (abortController.signal.aborted) {
                 return; // Cancelled by user — silently stop
             }
+            // Record the failed request so usage stays complete.
+            this.usageTracker.record({
+                model: modelId,
+                sessionId: usageMeta.sessionId,
+                initiator: usageMeta.initiator,
+                title: usageMeta.title,
+                workspace: usageMeta.workspace,
+                promptTokens: 0,
+                completionTokens: 0,
+                totalTokens: 0,
+                cachedTokens: 0,
+                reasoningTokens: 0,
+                error: true,
+            });
             const errorMessage = err instanceof Error ? err.message : String(err || 'unknown error');
             const wrappedError = new Error(
                 `Nika provider error (model: ${modelId}): ${errorMessage}`
@@ -705,6 +773,7 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
             throw wrappedError;
         } finally {
             cancelDisposable.dispose();
+            disposeStream();
         }
     }
 
@@ -1036,6 +1105,90 @@ export class NikaChatProvider implements vscode.LanguageModelChatProvider<vscode
 
         return Math.ceil(content.length / 4);
     }
+
+    /**
+     * Record a finished DeepSeek request in the usage ledger. If the server
+     * reported exact usage (captured via the `'usage'` data part), it wins;
+     * otherwise the live stream estimate is recorded so the request is still
+     * accounted for.
+     */
+    private _recordUsage(
+        modelId: string,
+        tracked: TokenTrackingProgress,
+        meta: { sessionId?: string; title?: string; workspace?: string; initiator?: string }
+    ): void {
+        const usage = tracked.exactUsage;
+        if (usage) {
+            this.usageTracker.record({
+                model: modelId,
+                sessionId: meta.sessionId,
+                initiator: meta.initiator,
+                title: meta.title,
+                workspace: meta.workspace,
+                promptTokens: usage.prompt_tokens,
+                completionTokens: usage.completion_tokens,
+                totalTokens: usage.total_tokens,
+                cachedTokens: usage.prompt_tokens_details?.cached_tokens ?? 0,
+                reasoningTokens: usage.completion_tokens_details?.reasoning_tokens ?? 0,
+            });
+            return;
+        }
+        // No server-reported usage (e.g. a stream that ended without one):
+        // fall back to the live estimate so the request is still accounted for.
+        const estimate = tracked.liveEstimateTokens;
+        if (estimate > 0) {
+            this.usageTracker.record({
+                model: modelId,
+                sessionId: meta.sessionId,
+                initiator: meta.initiator,
+                title: meta.title,
+                workspace: meta.workspace,
+                promptTokens: 0,
+                completionTokens: estimate,
+                totalTokens: estimate,
+                cachedTokens: 0,
+                reasoningTokens: 0,
+            });
+        }
+    }
+}
+
+/**
+ * Extract a short title (first user text) from the message list, used to label
+ * a token-usage session.
+ */
+function extractPromptTitle(messages: readonly vscode.LanguageModelChatRequestMessage[]): string | undefined {
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const content = (messages[i] as { content?: string | readonly unknown[] }).content;
+        if (typeof content === 'string' && content.trim()) {
+            return content.trim().slice(0, 80);
+        }
+        if (Array.isArray(content)) {
+            for (const part of content) {
+                if (part instanceof vscode.LanguageModelTextPart && part.value.trim()) {
+                    return part.value.trim().slice(0, 80);
+                }
+            }
+        }
+    }
+    return undefined;
+}
+
+/**
+ * Best-effort current workspace folder name for token-usage attribution.
+ * Falls back to the folder of the active text editor, then to `undefined`.
+ */
+function currentWorkspaceName(): string | undefined {
+    const folders = vscode.workspace.workspaceFolders;
+    if (folders && folders.length > 0) {
+        return folders[0].name;
+    }
+    const editor = vscode.window.activeTextEditor;
+    if (editor && editor.document.uri.scheme === 'file') {
+        const relative = vscode.workspace.asRelativePath(editor.document.uri, false);
+        return relative.split(/[\\/]/)[0];
+    }
+    return undefined;
 }
 
 /**

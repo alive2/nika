@@ -10,3 +10,7 @@ CachedProfilesData/**
 machineid
 nika.log
 *.log
+out/test/**
+out/usage/*.test.js
+out/usage/*.test.d.ts
+out/usage/*.test.d.ts.map

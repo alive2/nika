@@ -219,3 +219,10 @@ export const LOG_LEVELS: { id: LogLevel; label: string; description: string }[] 
 export function getLogLevelSetting(): LogLevel {
     return (getConfig().get<string>('logLevel') as LogLevel) ?? 'INFO';
 }
+
+// --- Usage tracking ---
+
+/** Whether DeepSeek token usage recording (and the status-bar meter) is on. */
+export function getUsageEnabled(): boolean {
+    return getConfig().get<boolean>('usage.enabled') ?? true;
+}

@@ -6,6 +6,8 @@ import { VISION_MODELS, getConfig, getOllamaBaseUrl, getVisionModelKey, DEEPSEEK
 import { setLogLevel } from './log.js';
 import { visionLog } from './vision/log.js';
 import { listVSCodeVisionModels } from './vision/sources/vscode-lm.js';
+import { NikaUsageStatus } from './usage/status.js';
+import { showUsagePanel } from './usage/panel.js';
 
 /**
  * Nika VS Code Extension — language model provider for Copilot Chat.
@@ -19,6 +21,10 @@ import { listVSCodeVisionModels } from './vision/sources/vscode-lm.js';
  */
 export async function activate(context: vscode.ExtensionContext) {
     const provider = new NikaChatProvider(context);
+
+    // Nika usage meter (DeepSeek token tracking) — status bar + summary.
+    const usageStatus = new NikaUsageStatus(provider.usageTracker);
+    context.subscriptions.push({ dispose: () => usageStatus.dispose() });
 
     // Sync log level from settings on startup
     setLogLevel(getLogLevelSetting());
@@ -68,6 +74,7 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('nika.setFlashForAllAgents', () => setFlashForAllAgents()),
         vscode.commands.registerCommand('nika.chooseLogLevel', () => chooseLogLevel()),
         vscode.commands.registerCommand('nika.checkForUpdates', () => checkForUpdates(context)),
+        vscode.commands.registerCommand('nika.showUsage', () => showUsagePanel(provider.usageTracker)),
         vscode.commands.registerCommand('nika.manage', () => {
             vscode.window.showQuickPick(
                 [
@@ -124,6 +131,10 @@ export async function activate(context: vscode.ExtensionContext) {
                         label: '$(cloud-download) Check for Updates',
                         description: 'Download and install the latest version from GitHub',
                     },
+                    {
+                        label: '$(pulse) Show Usage',
+                        description: 'Today / last-14-days DeepSeek token usage and estimated cost',
+                    },
                 ],
                 { title: 'Nika: Manage' }
             ).then(selection => {
@@ -172,6 +183,9 @@ export async function activate(context: vscode.ExtensionContext) {
                         break;
                     case '$(cloud-download) Check for Updates':
                         vscode.commands.executeCommand('nika.checkForUpdates');
+                        break;
+                    case '$(pulse) Show Usage':
+                        showUsagePanel(provider.usageTracker);
                         break;
                 }
             });

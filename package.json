@@ -2,7 +2,7 @@
   "name": "nika",
   "displayName": "Nika",
   "description": "DeepSeek language model provider for VS Code Copilot Chat, with configurable vision preprocessing (Gemma 4 via Ollama or Gemini)",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "publisher": "nika",
   "icon": "logo.png",
   "license": "MIT",
@@ -94,6 +94,12 @@
         "title": "Log Level",
         "category": "Nika",
         "icon": "$(output)"
+      },
+      {
+        "command": "nika.showUsage",
+        "title": "Show Usage",
+        "category": "Nika",
+        "icon": "$(pulse)"
       }
     ],
     "configuration": {
@@ -223,6 +229,11 @@
             "Detailed debugging — full request/response bodies, message dumps"
           ],
           "description": "Logging verbosity level. Writes to nika.log in the workspace root. Set to OFF to disable logging entirely. Set to VERBOSE when debugging API issues."
+        },
+        "nika.usage.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Record DeepSeek token usage (today / last-14-days totals and estimated cost) and show the Nika usage meter in the status bar. All data stays local in VS Code global storage."
         }
       }
     }
@@ -231,7 +242,8 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "package": "vsce package",
+    "test": "npm run compile && node --require ./out/test/bootstrap.js --test \"out/usage/*.test.js\""
   },
   "devDependencies": {
     "@types/node": "^25.9.1",

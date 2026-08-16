@@ -24,6 +24,19 @@ export interface StreamResult {
 }
 
 /**
+ * Server-reported token usage for a completed stream. Both the chat
+ * completions and Responses streamers report this on their `onComplete`
+ * callback. `cachedTokens` are input tokens served from the context cache;
+ * `reasoningTokens` are included in `completionTokens`.
+ */
+export interface StreamUsage {
+    promptTokens: number;
+    completionTokens: number;
+    cachedTokens: number;
+    reasoningTokens: number;
+}
+
+/**
  * Fetch with retry for transient network-level failures.
  *
  * "fetch failed" in VS Code's extension host (Electron fetch) is frequently a
@@ -125,7 +138,7 @@ export async function streamDeepSeekChat(
     signal: AbortSignal,
     onText: (text: string) => void,
     onToolCalls: (toolCalls: CompletedToolCall[]) => void,
-    onComplete: (usage?: { promptTokens: number; completionTokens: number }) => void
+    onComplete: (usage?: StreamUsage) => void
 ): Promise<StreamResult> {
     // Ensure stream options are set
     const streamRequest: DeepSeekRequest = {
@@ -265,6 +278,8 @@ export async function streamDeepSeekChat(
                         onComplete({
                             promptTokens: parsed.usage.prompt_tokens,
                             completionTokens: parsed.usage.completion_tokens,
+                            cachedTokens: parsed.usage.prompt_cache_hit_tokens ?? 0,
+                            reasoningTokens: parsed.usage.completion_tokens_details?.reasoning_tokens ?? 0,
                         });
                         hasCompleted = true;
                     }
@@ -307,6 +322,8 @@ export async function streamDeepSeekChat(
                             onComplete({
                                 promptTokens: parsed.usage.prompt_tokens,
                                 completionTokens: parsed.usage.completion_tokens,
+                                cachedTokens: parsed.usage.prompt_cache_hit_tokens ?? 0,
+                                reasoningTokens: parsed.usage.completion_tokens_details?.reasoning_tokens ?? 0,
                             });
                             hasCompleted = true;
                         }
@@ -347,7 +364,7 @@ export async function streamDeepSeekResponses(
     signal: AbortSignal,
     onText: (text: string) => void,
     onToolCalls: (toolCalls: CompletedToolCall[]) => void,
-    onComplete: (usage?: { promptTokens: number; completionTokens: number }) => void
+    onComplete: (usage?: StreamUsage) => void
 ): Promise<StreamResult> {
     const streamRequest: DeepSeekResponsesRequest = {
         ...request,
@@ -494,6 +511,8 @@ export async function streamDeepSeekResponses(
                     onComplete({
                         promptTokens: usage.input_tokens,
                         completionTokens: usage.output_tokens,
+                        cachedTokens: usage.input_tokens_details?.cached_tokens ?? 0,
+                        reasoningTokens: usage.output_tokens_details?.reasoning_tokens ?? 0,
                     });
                 }
                 break;
